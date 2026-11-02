@@ -1,0 +1,281 @@
+openapi: 3.1.0
+info:
+  title: SAM Local Desktop Internal API
+  version: 0.1.0
+  description: >-
+    Provisional contract for review. Existing project, workspace, chat, and
+    agent-settings routes remain authoritative where compatible. These
+    local-only operations are not enabled in hosted deployments.
+servers:
+  - url: http://127.0.0.1:{port}
+    description: Host-loopback listener for the packaged desktop UI.
+    variables:
+      port:
+        default: "0"
+        description: Assigned at startup and communicated only to the desktop shell.
+paths:
+  /api/local/health:
+    get:
+      operationId: getLocalRuntimeHealth
+      summary: Report local runtime readiness
+      security:
+        - localSession: []
+      responses:
+        "200":
+          description: Current local prerequisites and service readiness; no secret values.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalRuntimeHealth"
+        "401":
+          description: Local desktop session is missing or invalid.
+  /api/local/models/connection:
+    get:
+      operationId: getLocalModelConnection
+      summary: Retrieve the saved non-secret local model connection settings
+      security:
+        - localSession: []
+      responses:
+        "200":
+          description: The configured non-secret connection settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalModelConnection"
+        "401":
+          description: Local desktop session is missing or invalid.
+        "404":
+          description: No local model connection is configured.
+    put:
+      operationId: configureLocalModelConnection
+      summary: Save the non-secret settings for the local model connection
+      description: >-
+        Secret material is saved through the trusted desktop credential-store
+        boundary and is never accepted in this request. The API validates the
+        configured endpoint against the supported local destination policy and
+        stores only connection metadata and an opaque credential reference.
+      security:
+        - localSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocalModelConnectionInput"
+      responses:
+        "200":
+          description: The configured non-secret connection settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalModelConnection"
+        "400":
+          description: The provider, endpoint, model, or credential reference is invalid.
+        "401":
+          description: Local desktop session is missing or invalid.
+  /api/local/models/connection/verify:
+    post:
+      operationId: verifyLocalModelConnection
+      summary: Verify the saved local model connection
+      security:
+        - localSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [connectionId]
+              properties:
+                connectionId:
+                  type: string
+      responses:
+        "200":
+          description: Connection reachability and compatible model-list result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalModelConnectionVerification"
+        "401":
+          description: Local desktop session is missing or invalid.
+        "404":
+          description: The connection does not belong to this local installation.
+        "502":
+          description: The configured service is unavailable or incompatible.
+  /local-model/v1/models:
+    servers:
+      - url: http://sam-model-gateway:{port}
+        description: >-
+          Internal Docker service name on the SAM workspace network. This
+          listener is not published to the Windows host or local network.
+        variables:
+          port:
+            default: "80"
+            description: Private container listener configured by the local runtime.
+    get:
+      operationId: listConfiguredLocalModels
+      summary: List models for the connection assigned to this workspace
+      description: >-
+        The gateway resolves the connection from the scoped credential. Clients
+        cannot supply an upstream URL, host, or connection identifier.
+      security:
+        - workspaceGatewayToken: []
+      responses:
+        "200":
+          description: Models returned by the assigned local service.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, object]
+                      properties:
+                        id:
+                          type: string
+                        object:
+                          type: string
+        "401":
+          description: Workspace gateway token is missing, expired, or invalid.
+        "502":
+          description: Configured local model service is unavailable or incompatible.
+  /local-model/v1/chat/completions:
+    servers:
+      - url: http://sam-model-gateway:{port}
+        description: >-
+          Internal Docker service name on the SAM workspace network. This
+          listener is not published to the Windows host or local network.
+        variables:
+          port:
+            default: "80"
+            description: Private container listener configured by the local runtime.
+    post:
+      operationId: createLocalModelCompletion
+      summary: Send an OpenAI-compatible inference request to the assigned local service
+      description: >-
+        The gateway routes only to the connection bound to the workspace token.
+        It does not fall back to a cloud provider and must not log prompts or
+        authorization values. Streaming responses preserve the upstream SSE
+        contract.
+      security:
+        - workspaceGatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, messages]
+              properties:
+                model:
+                  type: string
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    required: [role, content]
+                    properties:
+                      role:
+                        type: string
+                      content: {}
+                stream:
+                  type: boolean
+      responses:
+        "200":
+          description: Completion response from the assigned local service.
+          content:
+            application/json:
+              schema:
+                type: object
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          description: Workspace gateway token is missing, expired, or invalid.
+        "403":
+          description: Token is not scoped to this workspace or configured model.
+        "502":
+          description: Configured local model service is unavailable or incompatible.
+components:
+  securitySchemes:
+    localSession:
+      type: apiKey
+      in: cookie
+      name: sam_local_session
+      description: >-
+        HttpOnly, SameSite-restricted local session issued by the local API.
+        The desktop renderer does not choose the principal identity.
+    workspaceGatewayToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: >-
+        Short-lived token scoped to one active workspace and its assigned local
+        model connection; it grants no access to the Docker API or other users.
+  schemas:
+    LocalModelConnectionInput:
+      type: object
+      required: [providerType, baseUrl, modelId]
+      properties:
+        providerType:
+          type: string
+          enum: [ollama, openai-compatible]
+        baseUrl:
+          type: string
+          format: uri
+          description: >-
+            Explicitly configured local service address. The API enforces the
+            supported local destination policy; arbitrary proxy targets are rejected.
+        modelId:
+          type: string
+        credentialRef:
+          type: string
+          description: Opaque reference only; never a secret value.
+    LocalModelConnection:
+      allOf:
+        - $ref: "#/components/schemas/LocalModelConnectionInput"
+        - type: object
+          required: [connectionId]
+          properties:
+            connectionId:
+              type: string
+            lastVerifiedAt:
+              type: string
+              format: date-time
+    LocalModelConnectionVerification:
+      type: object
+      required: [connectionId, status]
+      properties:
+        connectionId:
+          type: string
+        status:
+          type: string
+          enum: [usable, unavailable, incompatible]
+        models:
+          type: array
+          items:
+            type: string
+        message:
+          type: string
+    LocalRuntimeHealth:
+      type: object
+      required: [status, dockerDesktop, wsl2, dataStore]
+      properties:
+        status:
+          type: string
+          enum: [ready, degraded, unavailable]
+        dockerDesktop:
+          type: string
+          enum: [ready, stopped, unavailable]
+        wsl2:
+          type: string
+          enum: [ready, unavailable]
+        dataStore:
+          type: string
+          enum: [ready, migrating, recovery-required, unavailable]
+        message:
+          type: string
